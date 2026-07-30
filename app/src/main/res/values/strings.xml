@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">YT Lite</string>
+    <string name="channel_name">YT Lite Playback</string>
+    <string name="channel_description">Background media playback</string>
+</resources>
