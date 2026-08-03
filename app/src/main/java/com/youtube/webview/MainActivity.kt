@@ -172,6 +172,7 @@ class MainActivity : AppCompatActivity() {
                 super.onPageFinished(view, url)
                 view.evaluateJavascript(PAGE_SETUP_JS, null)
                 view.evaluateJavascript(AdBlocker.COSMETIC_FILTER_JS, null)
+                view.evaluateJavascript(AdBlocker.AUTO_SKIP_AD_JS, null)
             }
         }
 

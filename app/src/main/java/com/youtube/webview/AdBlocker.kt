@@ -14,7 +14,6 @@ object AdBlocker {
         "adservice.google.com",
         "partner.googleadservices.com",
         "static.doubleclick.net",
-        "imasdk.googleapis.com",
         "youtube.com/api/stats/ads",
         "youtube.com/pagead/",
         "youtube.com/ptracking",
@@ -100,6 +99,68 @@ object AdBlocker {
             });
 
             observer.observe(document.documentElement, { childList: true, subtree: true });
+        })();
+    """.trimIndent()
+
+    // The pre-roll/mid-roll video ad itself plays through the SAME <video> element as the real
+    // content (via Google's IMA SDK). We deliberately do NOT block that SDK's network requests
+    // anymore - doing so left the player stuck in a broken, unresponsive state (ad overlay stays
+    // on screen with no working Skip button, nothing tappable). Instead, we let the ad load
+    // normally so the player keeps functioning, and auto-skip it from JS: click "Skip" the
+    // moment it's available, and if the ad is unskippable, mute + fast-forward through it.
+    val AUTO_SKIP_AD_JS = """
+        (function() {
+            if (window.__ytLiteAdSkipInstalled) return;
+            window.__ytLiteAdSkipInstalled = true;
+
+            var hacking = false;
+            var prevRate = 1;
+            var prevMuted = false;
+
+            function tick() {
+                try {
+                    var player = document.querySelector('.html5-video-player');
+                    var video = document.querySelector('video');
+                    var isAd = player && (
+                        player.classList.contains('ad-showing') ||
+                        player.classList.contains('ad-interrupting')
+                    );
+
+                    if (isAd) {
+                        var skipBtn = document.querySelector(
+                            '.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button'
+                        );
+                        if (skipBtn) {
+                            skipBtn.click();
+                            return;
+                        }
+                        var closeBtn = document.querySelector('.ytp-ad-overlay-close-button');
+                        if (closeBtn) closeBtn.click();
+
+                        if (video) {
+                            if (!hacking) {
+                                hacking = true;
+                                prevRate = video.playbackRate;
+                                prevMuted = video.muted;
+                            }
+                            video.muted = true;
+                            video.playbackRate = 16;
+                            if (video.duration && isFinite(video.duration) &&
+                                (video.duration - video.currentTime) > 0.5) {
+                                video.currentTime = video.duration;
+                            }
+                        }
+                    } else if (hacking) {
+                        hacking = false;
+                        if (video) {
+                            video.playbackRate = prevRate || 1;
+                            video.muted = prevMuted;
+                        }
+                    }
+                } catch (e) {}
+            }
+
+            setInterval(tick, 250);
         })();
     """.trimIndent()
 }
