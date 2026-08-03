@@ -10,7 +10,7 @@ import android.os.Bundle
 import android.util.Rational
 import android.view.View
 import android.view.ViewGroup
-import android.view.WindowManager
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -20,7 +20,6 @@ import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -60,7 +59,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun hideSystemBars() {
-        // Edge-to-edge, no status bar / nav bar, feels like a native app (no browser chrome).
         WindowCompat.setDecorFitsSystemWindows(window, false)
         val controller = WindowInsetsControllerCompat(window, window.decorView)
         controller.hide(WindowInsetsCompat.Type.systemBars())
@@ -83,7 +81,6 @@ class MainActivity : AppCompatActivity() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 if (customView != null) {
-                    // Exit fullscreen video first instead of navigating back / closing app.
                     webView.evaluateJavascript(
                         "document.exitFullscreen && document.exitFullscreen();", null
                     )
@@ -97,12 +94,22 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
+    // ----------------------- Picture-in-Picture -----------------------
+
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        // User pressed Home / switched app while a video is likely playing -> auto enter PiP.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            enterPiP()
-        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
+
+        // Only go into PiP if a <video> element actually exists AND is currently playing.
+        // Without this check, leaving the app while just browsing the feed (no video open)
+        // would still shrink the whole page into a tiny floating window, which looks broken.
+        val checkJs = "(function(){var v=document.querySelector('video');" +
+            "return !!(v && !v.paused && !v.ended && v.currentTime > 0);})();"
+        webView.evaluateJavascript(checkJs, ValueCallback<String> { result ->
+            if (result == "true") {
+                enterPiP()
+            }
+        })
     }
 
     private fun enterPiP() {
@@ -113,7 +120,7 @@ class MainActivity : AppCompatActivity() {
             try {
                 enterPictureInPictureMode(params)
             } catch (_: IllegalStateException) {
-                // No video / activity not in a valid state for PiP, ignore.
+                // Activity not in a valid state for PiP right now, ignore.
             }
         }
     }
@@ -122,9 +129,16 @@ class MainActivity : AppCompatActivity() {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         isInPiP = isInPictureInPictureMode
         if (isInPiP) {
-            webView.evaluateJavascript("document.querySelector('video')?.play?.()", null)
+            // Strip away the surrounding YouTube page chrome (feed, header, comments, nav bar)
+            // and blow the <video> up to fill the whole floating window, so PiP shows just the
+            // video instead of the entire mobile page shrunk down.
+            webView.evaluateJavascript(PIP_ENTER_JS, null)
+        } else {
+            webView.evaluateJavascript(PIP_EXIT_JS, null)
         }
     }
+
+    // ----------------------- WebView setup -----------------------
 
     private fun setupWebView() {
         val settings = webView.settings
@@ -144,8 +158,6 @@ class MainActivity : AppCompatActivity() {
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val url = request.url.toString()
-                // Keep navigation inside the app for YouTube domains, block everything else
-                // (e.g. "Open in app" / external redirects) from hijacking the WebView.
                 return !(url.contains("youtube.com") || url.contains("youtu.be") || url.contains("google.com/accounts"))
             }
 
@@ -158,22 +170,13 @@ class MainActivity : AppCompatActivity() {
 
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
-                view.evaluateJavascript(
-                    "(function(){" +
-                        "Object.defineProperty(document,'hidden',{get:function(){return false}});" +
-                        "Object.defineProperty(document,'visibilityState',{get:function(){return'visible'}});" +
-                        "document.addEventListener('visibilitychange',function(e){e.stopImmediatePropagation()},true);" +
-                        "var v=document.querySelector('video');if(v){v.setAttribute('playsinline','');v.setAttribute('webkit-playsinline','');}" +
-                        "})()",
-                    null
-                )
+                view.evaluateJavascript(PAGE_SETUP_JS, null)
+                view.evaluateJavascript(AdBlocker.COSMETIC_FILTER_JS, null)
             }
         }
 
         webView.webChromeClient = object : WebChromeClient() {
 
-            // Handle native <video> fullscreen (fullscreen button in the player) so it actually
-            // shows instead of doing nothing.
             override fun onShowCustomView(view: View, callback: CustomViewCallback) {
                 if (customView != null) {
                     callback.onCustomViewHidden()
@@ -207,14 +210,11 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onPermissionRequest(request: android.webkit.PermissionRequest) {
-                // Deny mic/camera etc. by default; YouTube playback doesn't need them.
                 request.deny()
             }
         }
 
         webView.setDownloadListener { url, _, _, _, _ ->
-            // Let the system handle actual file downloads (e.g. thumbnails) via browser fallback,
-            // instead of silently failing inside the WebView.
             try {
                 val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url))
                 startActivity(intent)
@@ -231,5 +231,30 @@ class MainActivity : AppCompatActivity() {
         webView.destroy()
         stopService(Intent(this, BackgroundMusicService::class.java))
         super.onDestroy()
+    }
+
+    companion object {
+        private const val PAGE_SETUP_JS = "(function(){" +
+            "Object.defineProperty(document,'hidden',{get:function(){return false}});" +
+            "Object.defineProperty(document,'visibilityState',{get:function(){return'visible'}});" +
+            "document.addEventListener('visibilitychange',function(e){e.stopImmediatePropagation()},true);" +
+            "var v=document.querySelector('video');if(v){v.setAttribute('playsinline','');v.setAttribute('webkit-playsinline','');}" +
+            "})();"
+
+        private const val PIP_ENTER_JS = "(function(){" +
+            "var id='ytlite-pip-style';var s=document.getElementById(id);" +
+            "if(!s){s=document.createElement('style');s.id=id;" +
+            "s.innerHTML='body>*:not(video){visibility:hidden !important;}" +
+            "video{position:fixed !important;top:0 !important;left:0 !important;" +
+            "width:100vw !important;height:100vh !important;max-width:none !important;" +
+            "max-height:none !important;object-fit:contain !important;background:#000 !important;" +
+            "z-index:2147483647 !important;visibility:visible !important;margin:0 !important;}';" +
+            "document.documentElement.appendChild(s);}" +
+            "var v=document.querySelector('video');if(v){v.style.visibility='visible';}" +
+            "})();"
+
+        private const val PIP_EXIT_JS = "(function(){" +
+            "var s=document.getElementById('ytlite-pip-style');if(s){s.remove();}" +
+            "})();"
     }
 }
